@@ -3,11 +3,29 @@ from uipath.platform.common._config import UiPathApiConfig
 from uipath.platform.common._execution_context import UiPathExecutionContext
 from uipath.platform.chat._llm_gateway_service import UiPathOpenAIService, ChatModels
 
+_TRIAGE_REQUIRED = {"issue_type", "triage_notes"}
+_DIAGNOSE_REQUIRED = {"diagnosis", "bot_name", "confidence", "error_found", "recommended_action"}
+
 
 def _make_service(access_token: str, base_url: str) -> UiPathOpenAIService:
     execution_context = UiPathExecutionContext()
     config = UiPathApiConfig(base_url=base_url, secret=access_token, execution_context=execution_context)
     return UiPathOpenAIService(config=config, execution_context=execution_context)
+
+
+def _parse(raw: str, required_keys: set | None = None) -> dict:
+    cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM returned invalid JSON: {e}\nRaw response: {raw[:500]}") from e
+    if not isinstance(data, dict):
+        raise ValueError(f"LLM response is not a JSON object: {type(data)}")
+    if required_keys:
+        missing = required_keys - data.keys()
+        if missing:
+            raise ValueError(f"LLM response missing required keys {missing}. Got: {list(data.keys())}")
+    return data
 
 
 async def triage(access_token: str, base_url: str, description: str, logs: str) -> dict:
@@ -34,8 +52,8 @@ Respond ONLY in valid JSON with:
         {"role": "user", "content": prompt},
     ]
     response = await service.chat_completions(messages, model=ChatModels.gpt_4_1_mini_2025_04_14, max_tokens=256, temperature=0)
-    raw = response.choices[0].message.content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(raw)
+    raw = response.choices[0].message.content
+    return _parse(raw, _TRIAGE_REQUIRED)
 
 
 async def diagnose(access_token: str, base_url: str, team: str, transaction_id: str, description: str,
@@ -103,8 +121,8 @@ Respond ONLY in valid JSON with these exact keys:
         {"role": "user", "content": prompt},
     ]
     response = await service.chat_completions(messages, model=ChatModels.gpt_4_1_mini_2025_04_14, max_tokens=1024, temperature=0.2)
-    raw = response.choices[0].message.content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(raw)
+    raw = response.choices[0].message.content
+    return _parse(raw, _DIAGNOSE_REQUIRED)
 
 
 async def diagnose_targeted(access_token: str, base_url: str, team: str, transaction_id: str,
@@ -147,5 +165,5 @@ Respond ONLY in valid JSON with keys: diagnosis, bot_name, confidence, error_fou
         {"role": "user", "content": prompt},
     ]
     response = await service.chat_completions(messages, model=ChatModels.gpt_4_1_mini_2025_04_14, max_tokens=1024, temperature=0.1)
-    raw = response.choices[0].message.content.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    return json.loads(raw)
+    raw = response.choices[0].message.content
+    return _parse(raw, _DIAGNOSE_REQUIRED)

@@ -1,10 +1,6 @@
 # SpectreInvestigationAgent
 
-## Overview
-
-**SpectreInvestigationAgent** is a Python-based UiPath coded agent and the *diagnostic engine* of the **SpectreAI** autonomous RPA bot self-healing system. When a UiPath bot fails, this agent automatically retrieves the failure logs from Orchestrator, analyses the exception trace, identifies the root cause using an LLM, and emits a structured diagnosis ready for the downstream coding agent to act on.
-
----
+**SpectreInvestigationAgent** is a Python-based UiPath coded agent and the *diagnostic engine* of the **SpectreAI** autonomous RPA bot self-healing system. When a UiPath bot fails, this agent automatically retrieves the failure logs from Orchestrator, triages the issue type, searches a knowledge base for past resolutions, and returns a structured diagnosis with confidence scoring ready for the downstream coding agent to act on.
 
 ## Role in the SpectreAI System
 
@@ -12,7 +8,7 @@ SpectreAI is a two-agent pipeline for autonomous RPA bot repair:
 
 | Agent | Responsibility |
 |---|---|
-| **SpectreInvestigationAgent** *(this repo)* | Pulls Orchestrator logs, analyses exceptions, diagnoses root cause, produces a structured fix recommendation |
+| **SpectreInvestigationAgent** *(this repo)* | Pulls Orchestrator logs, triages issue type, diagnoses root cause, produces a structured fix recommendation |
 | **SpectreCodingAgent** | Consumes the diagnosis, fetches XAML source from GitHub, applies the LLM-generated patch, opens a draft PR |
 
 ```
@@ -21,58 +17,88 @@ Bot Failure (Orchestrator Job)
     v
 SpectreInvestigationAgent
     +-- Orchestrator API --> Job Logs & Exception Details
-    +-- LLM Analysis    --> Root Cause Classification
+    +-- Triage LLM      --> Issue Type Classification
+    +-- KB Search       --> Past Resolution Lookup
+    +-- Diagnose LLM    --> Root Cause & Recommendation
     +-- Output          --> Structured Diagnosis JSON
                                     |
                                     v
                         SpectreCodingAgent (patch & PR)
 ```
 
----
+## How It Works
 
-## Architecture
+1. **Fetch logs** — 3-layer fallback strategy:
+   - Layer 1: Queue item timestamps (most precise)
+   - Layer 2: Transaction ID in log messages, bounded by job window
+   - Layer 3: Today's Performer/Runner error logs (broad fallback)
+2. **Triage** — LLM classifies issue type: `credentials`, `timeout`, `business_exception`, `system_error`, or `unknown`
+3. **KB search** — searches SpectreKB context grounding index for similar past incidents
+4. **Cross-transaction analysis** — checks if other transactions in the same process also failed (systemic issue detection)
+5. **Diagnose** — LLM produces structured diagnosis grounded strictly in log evidence
+6. **Confidence retry** — if confidence is Low and issue type is known, a second targeted LLM call re-examines the logs
+7. **KB ingest** — successful diagnoses are uploaded to SpectreKB for future reference
 
-1. **Trigger** - Invoked when an Orchestrator job enters a *Faulted* state (webhook, schedule, or manual trigger).
-2. **Log Retrieval** - Calls the UiPath Orchestrator API to pull job logs and the full exception trace for the failed run.
-3. **Exception Analysis** - Parses the stack trace to extract the failing activity, exception type, and contextual data.
-4. **LLM Diagnosis** - Sends the exception context to an LLM to classify the root cause and recommend a concrete fix action.
-5. **Structured Output** - Returns a JSON diagnosis document consumed by `SpectreCodingAgent`.
+## Output
 
----
+```json
+{
+  "diagnosis": "AuthenticationException at SAP login step — credential asset may have expired",
+  "bot_name": "InvoiceProcessing_Performer",
+  "confidence": "High",
+  "error_found": true,
+  "recommended_action": "Rotate the SAP credential asset in Orchestrator and retry"
+}
+```
 
-## Tech Stack
+## Local Setup
 
-| Layer | Technology |
-|---|---|
-| Runtime | Python 3.x |
-| Agent Framework | UiPath Coded Workflows / Agent SDK |
-| Orchestrator Integration | UiPath Orchestrator REST API |
-| LLM Integration | UiPath AI / LLM connector |
-| Orchestration | UiPath Orchestrator |
+```bash
+uv sync
+cp .env.example .env   # fill in UIPATH_PAT and UIPATH_URL
+uv run uipath run main '{"transaction_id": "INV-001", "description": "...", "team": "Finance", "process_name": "ICSAUTO-3201 Invoice Processing Performer", "channel_id": "C123", "thread_ts": "123.456"}'
+```
 
----
+## Environment Variables
 
-## Getting Started
+| Variable | Required | Description |
+|---|---|---|
+| `UIPATH_PAT` | Yes (local) | Personal Access Token for Orchestrator API calls |
+| `UIPATH_URL` | No | Orchestrator base URL (defaults to staging tenant) |
+| `UIPATH_ACCESS_TOKEN` | Yes (robot) | Injected by UiPath at runtime |
+| `SPECTRE_FOLDER_ID` | No | Orchestrator folder ID for Spectre assets (defaults to `3087542`) — override when deploying to a different tenant |
 
-### Prerequisites
+## Running Tests
 
-- Python 3.9+
-- UiPath Studio / Robot with Coded Workflows support
-- UiPath Orchestrator API credentials (Client ID + Secret or PAT)
-- LLM endpoint configured in UiPath AI Gateway
+```bash
+uv run pytest tests/ -v
+```
 
-### Configuration
+## Running Evaluations
 
-Set the following in UiPath Orchestrator Assets or environment variables:
+```bash
+uv run uipath eval main evaluations/eval-sets/spectre-investigation.json --output-file eval-results.json
+```
 
-| Asset | Description |
-|---|---|
-| `ORCHESTRATOR_URL` | Base URL of your UiPath Orchestrator instance |
-| `ORCHESTRATOR_CLIENT_ID` | OAuth2 client ID for Orchestrator API access |
-| `ORCHESTRATOR_CLIENT_SECRET` | OAuth2 client secret |
-| `LLM_ENDPOINT` | UiPath AI Gateway or Azure OpenAI endpoint |
+## Project Structure
 
----
+```
+src/spectre/
+  agent.py          — main orchestration (7-step pipeline)
+  orchestrator.py   — Orchestrator API calls with 3-layer log fetch and retry
+  llm.py            — LLM calls (triage, diagnose, diagnose_targeted) with response validation
+  auth.py           — token management (local .auth.json + robot asset fallback)
+  logger.py         — structured logging
+
+evaluations/
+  eval-sets/        — evaluation test cases
+  evaluators/       — evaluator configs
+
+tests/
+  test_agent.py
+  test_llm.py
+  test_orchestrator.py
+```
 
 ## Related Repositories
 

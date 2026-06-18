@@ -1,4 +1,5 @@
 import re
+import time
 import requests
 from datetime import datetime, timezone
 try:
@@ -7,6 +8,29 @@ except ImportError:
     from logger import get_logger
 
 log = get_logger("spectre.orchestrator")
+
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF = 2.0
+
+
+def _get(url: str, **kwargs) -> requests.Response:
+    """requests.get with retry on 5xx/connection errors. 4xx errors are raised immediately."""
+    last_exc = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            resp = requests.get(url, **kwargs)
+            if resp.status_code < 500:
+                return resp
+            log.warning(f"Orchestrator API returned {resp.status_code} (attempt {attempt + 1}/{_RETRY_ATTEMPTS}), retrying...")
+        except requests.RequestException as e:
+            log.warning(f"Orchestrator API request failed (attempt {attempt + 1}/{_RETRY_ATTEMPTS}): {e}")
+            last_exc = e
+        if attempt < _RETRY_ATTEMPTS - 1:
+            time.sleep(_RETRY_BACKOFF ** attempt)
+    if last_exc:
+        raise last_exc
+    resp.raise_for_status()
+    return resp
 
 
 def _extract_numeric_id(process_name: str) -> str | None:
@@ -19,7 +43,7 @@ def _find_folder_id(access_token: str, base_url: str, numeric_id: str) -> str | 
     """Find Orchestrator folder ID whose name contains the numeric process ID."""
     headers = {"Authorization": f"Bearer {access_token}"}
     try:
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/Folders",
             headers=headers,
             params={"$filter": f"contains(FullyQualifiedName, '{numeric_id}')"},
@@ -66,7 +90,7 @@ def _layer1_queue(access_token: str, base_url: str, headers: dict, transaction_i
       - (None, None) — item not found or in-progress; caller should try next layer
     """
     try:
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/QueueItems",
             headers=headers,
             params={"$filter": f"contains(Reference, '{transaction_id}')"},
@@ -102,7 +126,7 @@ def _layer1_queue(access_token: str, base_url: str, headers: dict, transaction_i
         if end_ts:
             log_filter += f" and TimeStamp le {end_ts}"
 
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/RobotLogs",
             headers=headers,
             params={"$filter": log_filter, "$orderby": "TimeStamp asc", "$top": 50},
@@ -137,7 +161,7 @@ def _layer2_transaction_in_logs(access_token: str, base_url: str, headers: dict,
     """
     try:
         # Search without ProcessName filter — dispatcher or performer may have logged the reference
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/RobotLogs",
             headers=headers,
             params={
@@ -166,7 +190,7 @@ def _layer2_transaction_in_logs(access_token: str, base_url: str, headers: dict,
             return None, None
 
         # Find 'Transaction Ended' log for the same job after start to bound the window
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/RobotLogs",
             headers=headers,
             params={
@@ -185,7 +209,7 @@ def _layer2_transaction_in_logs(access_token: str, base_url: str, headers: dict,
         if end_ts:
             log_filter += f" and TimeStamp le {end_ts}"
 
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/RobotLogs",
             headers=headers,
             params={"$filter": log_filter, "$orderby": "TimeStamp asc", "$top": 50},
@@ -211,7 +235,7 @@ def _layer3_todays_errors(access_token: str, base_url: str, headers: dict, proce
             f"and Level eq 'Error' "
             f"and TimeStamp ge {today}"
         )
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/RobotLogs",
             headers=headers,
             params={
@@ -236,7 +260,7 @@ def fetch_recent_failures(access_token: str, base_url: str, process_name: str, e
     folder_id = _find_folder_id(access_token, base_url, numeric_id) if numeric_id else None
     headers = _build_headers(access_token, folder_id)
     try:
-        resp = requests.get(
+        resp = _get(
             f"{base_url}/orchestrator_/odata/QueueItems",
             headers=headers,
             params={

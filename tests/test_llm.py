@@ -1,3 +1,4 @@
+import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
 from spectre.llm import diagnose, triage, diagnose_targeted
 
@@ -17,7 +18,7 @@ def _make_mock_service(content: str):
 class TestDiagnose:
 
     async def test_returns_structured_result(self):
-        mock_service = _make_mock_service('{"diagnosis": "Timeout at login", "bot_name": "FinanceBot", "confidence": "High", "error_found": true}')
+        mock_service = _make_mock_service('{"diagnosis": "Timeout at login", "bot_name": "FinanceBot", "confidence": "High", "error_found": true, "recommended_action": "Reset credentials"}')
         with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
              patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
             result = await diagnose(
@@ -30,7 +31,7 @@ class TestDiagnose:
         assert result["error_found"] is True
 
     async def test_fallback_source_injects_low_confidence_note(self):
-        mock_service = _make_mock_service('{"diagnosis": "Unknown", "bot_name": "Bot", "confidence": "Low", "error_found": false}')
+        mock_service = _make_mock_service('{"diagnosis": "Unknown", "bot_name": "Bot", "confidence": "Low", "error_found": false, "recommended_action": "Monitor"}')
         with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
              patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
             await diagnose(
@@ -45,7 +46,7 @@ class TestDiagnose:
         assert "Low" in user_prompt
 
     async def test_non_fallback_source_has_no_note(self):
-        mock_service = _make_mock_service('{"diagnosis": "T", "bot_name": "B", "confidence": "High", "error_found": true}')
+        mock_service = _make_mock_service('{"diagnosis": "T", "bot_name": "B", "confidence": "High", "error_found": true, "recommended_action": "None"}')
         with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
              patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
             await diagnose(
@@ -59,11 +60,35 @@ class TestDiagnose:
         assert "NOTE" not in user_prompt
 
     async def test_strips_markdown_fences(self):
-        mock_service = _make_mock_service('```json\n{"diagnosis": "Test", "bot_name": "Bot", "confidence": "Low", "error_found": false}\n```')
+        mock_service = _make_mock_service('```json\n{"diagnosis": "Test", "bot_name": "Bot", "confidence": "Low", "error_found": false, "recommended_action": "Monitor"}\n```')
         with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
              patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
             result = await diagnose(access_token="fake", base_url="https://example.com", team="Team", transaction_id="TXN-001", description="desc", logs="logs")
         assert result["diagnosis"] == "Test"
+
+
+class TestParse:
+
+    async def test_raises_on_malformed_json(self):
+        mock_service = _make_mock_service("not valid json at all {")
+        with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
+             patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
+            with pytest.raises(ValueError, match="LLM returned invalid JSON"):
+                await diagnose(access_token="fake", base_url="https://example.com", team="T", transaction_id="TXN-001", description="d", logs="l")
+
+    async def test_raises_on_missing_required_keys(self):
+        mock_service = _make_mock_service('{"diagnosis": "x", "bot_name": "y"}')
+        with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
+             patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
+            with pytest.raises(ValueError, match="missing required keys"):
+                await diagnose(access_token="fake", base_url="https://example.com", team="T", transaction_id="TXN-001", description="d", logs="l")
+
+    async def test_raises_on_non_object_response(self):
+        mock_service = _make_mock_service('["a", "b"]')
+        with patch("spectre.llm.UiPathOpenAIService", return_value=mock_service), \
+             patch("spectre.llm.UiPathApiConfig"), patch("spectre.llm.UiPathExecutionContext"):
+            with pytest.raises(ValueError, match="not a JSON object"):
+                await diagnose(access_token="fake", base_url="https://example.com", team="T", transaction_id="TXN-001", description="d", logs="l")
 
 
 class TestTriage:

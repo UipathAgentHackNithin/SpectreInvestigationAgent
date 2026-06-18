@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "id": "ExactMatchEvaluator",
+  "name": "ExactMatchEvaluator",
+  "description": "Checks for exact output match on boolean and enum fields",
+  "evaluatorTypeId": "uipath-exact-match",
+  "evaluatorConfig": {
+    "name": "ExactMatchEvaluator",
+    "targetOutputKey": "*"
+  }
+}

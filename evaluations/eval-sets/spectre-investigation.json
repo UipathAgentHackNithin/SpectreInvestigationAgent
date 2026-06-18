@@ -1,0 +1,103 @@
+{
+  "version": "1.0",
+  "id": "spectre-investigation-eval",
+  "name": "Spectre Investigation Agent — Structural Assertions",
+  "evaluatorRefs": ["ExactMatchEvaluator"],
+  "evaluations": [
+    {
+      "id": "eval-001",
+      "name": "SAP login failure — error found, High confidence expected",
+      "inputs": {
+        "transaction_id": "INV-10001",
+        "description": "Bot is failing at the SAP login step with an AuthenticationException. The bot stops immediately after the login activity.",
+        "team": "Finance",
+        "process_name": "ICSAUTO-3201 Invoice Processing Performer",
+        "channel_id": "C_FINANCE",
+        "thread_ts": "1700000001.000100"
+      },
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {
+            "error_found": true
+          }
+        }
+      }
+    },
+    {
+      "id": "eval-002",
+      "name": "No error in logs — error_found should be false",
+      "inputs": {
+        "transaction_id": "INV-10002",
+        "description": "User says invoice was not processed but we cannot reproduce the issue.",
+        "team": "Finance",
+        "process_name": "ICSAUTO-3201 Invoice Processing Performer",
+        "channel_id": "C_FINANCE",
+        "thread_ts": "1700000002.000200"
+      },
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {
+            "error_found": false
+          }
+        }
+      }
+    },
+    {
+      "id": "eval-003",
+      "name": "Network timeout — error_found true, confidence not Low",
+      "inputs": {
+        "transaction_id": "INV-10003",
+        "description": "Bot is timing out when trying to reach the vendor portal. The TimeoutException appears consistently after 30 seconds.",
+        "team": "Procurement",
+        "process_name": "ICSAUTO-4401 Vendor Invoice Runner",
+        "channel_id": "C_PROCUREMENT",
+        "thread_ts": "1700000003.000300"
+      },
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {
+            "error_found": true
+          }
+        }
+      }
+    },
+    {
+      "id": "eval-004",
+      "name": "Business rule violation — missing mandatory field",
+      "inputs": {
+        "transaction_id": "INV-10004",
+        "description": "Bot throws a BusinessRuleException because the PO number field is blank on the invoice. This is a data quality issue.",
+        "team": "Accounts Payable",
+        "process_name": "ICSAUTO-5501 AP Invoice Performer",
+        "channel_id": "C_AP",
+        "thread_ts": "1700000004.000400"
+      },
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {
+            "error_found": true
+          }
+        }
+      }
+    },
+    {
+      "id": "eval-005",
+      "name": "Transaction queued but not yet processed — error_found false",
+      "inputs": {
+        "transaction_id": "INV-10005",
+        "description": "The invoice was submitted an hour ago but the bot has not picked it up yet. No failure reported.",
+        "team": "Finance",
+        "process_name": "ICSAUTO-3201 Invoice Processing Performer",
+        "channel_id": "C_FINANCE",
+        "thread_ts": "1700000005.000500"
+      },
+      "evaluationCriterias": {
+        "ExactMatchEvaluator": {
+          "expectedOutput": {
+            "error_found": false
+          }
+        }
+      }
+    }
+  ]
+}

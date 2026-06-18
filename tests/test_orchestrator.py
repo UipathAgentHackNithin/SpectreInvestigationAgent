@@ -1,5 +1,64 @@
-from unittest.mock import patch, MagicMock
-from spectre.orchestrator import fetch_logs, fetch_recent_failures, _extract_numeric_id, _find_folder_id
+from unittest.mock import patch, MagicMock, call
+import requests as requests_lib
+from spectre.orchestrator import fetch_logs, fetch_recent_failures, _extract_numeric_id, _find_folder_id, _get
+
+
+class TestRetry:
+
+    def _make_resp(self, status_code):
+        mock = MagicMock()
+        mock.status_code = status_code
+        mock.raise_for_status = MagicMock()
+        mock.json.return_value = {"value": []}
+        return mock
+
+    def test_retries_on_500_then_succeeds(self):
+        fail = self._make_resp(500)
+        ok = self._make_resp(200)
+        with patch("spectre.orchestrator.requests.get", side_effect=[fail, ok]) as mock_get, \
+             patch("spectre.orchestrator.time.sleep"):
+            resp = _get("https://example.com", timeout=10)
+        assert resp.status_code == 200
+        assert mock_get.call_count == 2
+
+    def test_raises_immediately_on_4xx(self):
+        fail = self._make_resp(404)
+        with patch("spectre.orchestrator.requests.get", return_value=fail) as mock_get, \
+             patch("spectre.orchestrator.time.sleep"):
+            resp = _get("https://example.com", timeout=10)
+        assert resp.status_code == 404
+        assert mock_get.call_count == 1
+
+    def test_retries_on_connection_error_then_succeeds(self):
+        ok = self._make_resp(200)
+        with patch("spectre.orchestrator.requests.get", side_effect=[requests_lib.ConnectionError("down"), ok]) as mock_get, \
+             patch("spectre.orchestrator.time.sleep"):
+            resp = _get("https://example.com", timeout=10)
+        assert resp.status_code == 200
+        assert mock_get.call_count == 2
+
+    def test_raises_after_all_attempts_exhausted(self):
+        import pytest
+        with patch("spectre.orchestrator.requests.get", side_effect=requests_lib.ConnectionError("down")), \
+             patch("spectre.orchestrator.time.sleep"):
+            with pytest.raises(requests_lib.ConnectionError):
+                _get("https://example.com", timeout=10)
+
+    def test_layer1_retries_on_5xx_before_falling_through(self):
+        """A 5xx on Layer 1 queue call should retry, not immediately fall to Layer 3."""
+        folder_resp = self._make_resp(200)
+        folder_resp.json.return_value = {"value": []}
+        fail_500 = self._make_resp(500)
+        ok_empty = self._make_resp(200)
+        ok_empty.json.return_value = {"value": []}
+        layer3_resp = self._make_resp(200)
+        layer3_resp.json.return_value = {"value": [
+            {"TimeStamp": "t", "Level": "Error", "Message": "err", "RobotName": "r", "ProcessName": "Performer"}
+        ]}
+        with patch("spectre.orchestrator.requests.get", side_effect=[folder_resp, fail_500, ok_empty, ok_empty, layer3_resp]), \
+             patch("spectre.orchestrator.time.sleep"):
+            logs, source = fetch_logs("tok", "https://example.com", "TXN-1", "ICSAUTO-3201 Bot")
+        assert "err" in logs
 
 
 class TestExtractNumericId:
@@ -18,6 +77,7 @@ class TestFindFolderId:
 
     def test_returns_folder_id_when_found(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {"value": [{"Id": 3077087, "FullyQualifiedName": "Automation Process/3201 Invoice Processing"}]}
         mock_response.raise_for_status = MagicMock()
 
@@ -28,6 +88,7 @@ class TestFindFolderId:
 
     def test_returns_none_when_not_found(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {"value": []}
         mock_response.raise_for_status = MagicMock()
 
@@ -41,6 +102,7 @@ class TestFetchLogs:
 
     def _make_resp(self, value):
         mock = MagicMock()
+        mock.status_code = 200
         mock.json.return_value = {"value": value}
         mock.raise_for_status = MagicMock()
         return mock
@@ -151,6 +213,7 @@ class TestFetchRecentFailures:
 
     def _make_resp(self, value):
         mock = MagicMock()
+        mock.status_code = 200
         mock.json.return_value = {"value": value}
         mock.raise_for_status = MagicMock()
         return mock

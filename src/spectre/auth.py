@@ -15,6 +15,11 @@ _LLM_TOKEN_FOLDER = "Shared/Specter"
 
 _llm_token_cache: dict = {}  # keys: access_token, expires_at
 
+# Folder ID for the Shared/Specter folder on the staging tenant.
+# Override via SPECTRE_FOLDER_ID env var if deploying to a different tenant.
+# On robot, set this as an Orchestrator robot environment variable — .env is not available.
+_SPECTRE_FOLDER_ID = os.getenv("SPECTRE_FOLDER_ID", "3087542")
+
 
 def _get_robot_token() -> str | None:
     return os.getenv("UIPATH_ACCESS_TOKEN") or os.getenv("UIPATH_ROBOT_ACCESS_TOKEN")
@@ -22,41 +27,6 @@ def _get_robot_token() -> str | None:
 
 def _get_base_url() -> str:
     return os.getenv("UIPATH_URL", _DEFAULT_BASE_URL)
-
-
-def get_user_token() -> tuple[str, str]:
-    """Return (token, base_url) for LLM calls.
-    On robot: uses UIPATH_ACCESS_TOKEN injected by UiPath.
-    Locally: reads from .auth.json, refreshing if expired.
-    """
-    base_url = _get_base_url()
-
-    robot_token = _get_robot_token()
-    if robot_token:
-        return robot_token, base_url
-
-    with open(_AUTH_PATH) as f:
-        data = json.load(f)
-
-    issued_at = data.get("issued_at", 0)
-    expires_in = data.get("expires_in", 3600)
-    if time.time() > issued_at + expires_in - 60:
-        resp = requests.post(
-            _TOKEN_URL,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": data["refresh_token"],
-                "client_id": _CLIENT_ID,
-            }
-        )
-        resp.raise_for_status()
-        new_data = resp.json()
-        new_data["issued_at"] = time.time()
-        data.update(new_data)
-        with open(_AUTH_PATH, "w") as f:
-            json.dump(data, f)
-
-    return data["access_token"], base_url
 
 
 def get_llm_token() -> tuple[str, str]:
@@ -103,7 +73,7 @@ def get_llm_token() -> tuple[str, str]:
 
     pat, _ = get_pat()
 
-    folder_id = "3087542"
+    folder_id = _SPECTRE_FOLDER_ID
 
     headers = {"Authorization": f"Bearer {pat}", "X-UIPATH-OrganizationUnitId": folder_id}
 
@@ -176,7 +146,7 @@ def get_pat() -> tuple[str, str]:
         raise ValueError("Neither UIPATH_PAT nor UIPATH_ACCESS_TOKEN is available")
 
     # On robot: fetch the PAT stored as an Orchestrator asset
-    folder_id = "3087542"
+    folder_id = _SPECTRE_FOLDER_ID
     headers = {"Authorization": f"Bearer {robot_token}", "X-UIPATH-OrganizationUnitId": folder_id}
     resp = requests.get(
         f"{base_url}/orchestrator_/odata/Assets?$filter=Name eq 'SpectrePAT'",
