@@ -1,0 +1,86 @@
+{
+    "$schema": "https://cloud.uipath.com/draft/2024-12/entry-point",
+    "$id": "entry-points.json",
+    "entryPoints": [
+        {
+            "filePath": "investigate",
+            "uniqueId": "786ba8e5-aba4-4ce8-b603-88fda0b96dbc",
+            "type": "function",
+            "input": {
+                "type": "object",
+                "properties": {
+                    "transaction_id": {
+                        "title": "Transaction Id",
+                        "type": "string"
+                    },
+                    "description": {
+                        "title": "Description",
+                        "type": "string"
+                    },
+                    "team": {
+                        "title": "Team",
+                        "type": "string"
+                    },
+                    "process_name": {
+                        "default": "",
+                        "title": "Process Name",
+                        "type": "string"
+                    },
+                    "channel_id": {
+                        "title": "Channel Id",
+                        "type": "string"
+                    },
+                    "thread_ts": {
+                        "title": "Thread Ts",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "transaction_id",
+                    "description",
+                    "team",
+                    "channel_id",
+                    "thread_ts"
+                ],
+                "title": "InvestigateIn"
+            },
+            "output": {
+                "type": "object",
+                "properties": {
+                    "diagnosis": {
+                        "title": "Diagnosis",
+                        "type": "string"
+                    },
+                    "bot_name": {
+                        "title": "Bot Name",
+                        "type": "string"
+                    },
+                    "confidence": {
+                        "title": "Confidence",
+                        "type": "string"
+                    },
+                    "error_found": {
+                        "title": "Error Found",
+                        "type": "boolean"
+                    },
+                    "recommended_action": {
+                        "title": "Recommended Action",
+                        "type": "string"
+                    }
+                },
+                "required": [
+                    "diagnosis",
+                    "bot_name",
+                    "confidence",
+                    "error_found",
+                    "recommended_action"
+                ],
+                "title": "InvestigateOut"
+            },
+            "graph": {
+                "nodes": [],
+                "edges": []
+            }
+        }
+    ]
+}

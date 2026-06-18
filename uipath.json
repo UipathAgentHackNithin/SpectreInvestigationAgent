@@ -1,0 +1,17 @@
+{
+  "$schema": "https://cloud.uipath.com/draft/2024-12/uipath",
+  "runtimeOptions": {
+    "isConversational": false
+  },
+  "packOptions": {
+    "fileExtensionsIncluded": [],
+    "filesIncluded": [],
+    "filesExcluded": ["refresh_token.ps1"],
+    "directoriesExcluded": [],
+    "includeUvLock": true
+  },
+  "functions": {
+    "investigate": "main.py:investigate"
+  },
+  "agents": {}
+}

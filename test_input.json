@@ -1,0 +1,8 @@
+{
+  "transaction_id": "INV-98768",
+  "description": "Failed with a SAP login error",
+  "team": "Finace",
+  "process_name": "3201",
+  "channel_id": "C123",
+  "thread_ts": "123.456"
+}

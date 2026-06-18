@@ -1,0 +1,22 @@
+[project]
+name = "SpectreInvestigationAgent"
+version = "1.0.19"
+description = "SpectreAI - Intelligent RPA bot investigation agent"
+authors = [{ name = "Nithin BR" }]
+requires-python = ">=3.10"
+dependencies = [
+    "uipath",
+    "requests",
+    "python-dotenv",
+]
+
+[tool.uipath]
+main = "main.py"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["src"]
