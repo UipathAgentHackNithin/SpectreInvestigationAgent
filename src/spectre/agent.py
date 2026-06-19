@@ -4,12 +4,12 @@ from pydantic import BaseModel
 from uipath.platform import UiPath
 try:
     from .auth import get_pat, get_llm_token
-    from .orchestrator import fetch_logs, fetch_recent_failures
+    from .orchestrator import fetch_logs, fetch_recent_failures, _TRANSACTION_NOT_FOUND
     from .llm import triage, diagnose, diagnose_targeted
     from .logger import get_logger
 except ImportError:
     from auth import get_pat, get_llm_token
-    from orchestrator import fetch_logs, fetch_recent_failures
+    from orchestrator import fetch_logs, fetch_recent_failures, _TRANSACTION_NOT_FOUND
     from llm import triage, diagnose, diagnose_targeted
     from logger import get_logger
 
@@ -17,6 +17,19 @@ log = get_logger("spectre.agent")
 
 _CG_INDEX_NAME = "SpectreKB"
 _CG_FOLDER_PATH = "Shared/Specter"
+_SUPPORT_HANDLE_FALLBACK = "<!subteam^S0BBTE9DA0N>"
+
+
+def _get_support_handle(sdk: UiPath) -> str:
+    """Read SPECTRE_SUPPORT_HANDLE asset from Orchestrator; fall back to hardcoded tag."""
+    try:
+        asset = sdk.assets.retrieve("SPECTRE_SUPPORT_HANDLE", folder_path=_CG_FOLDER_PATH)
+        value = getattr(asset, "string_value", None) or getattr(asset, "StringValue", None) or getattr(asset, "value", None)
+        if value:
+            return value
+    except Exception as e:
+        log.warning(f"Could not read SPECTRE_SUPPORT_HANDLE asset: {e}")
+    return _SUPPORT_HANDLE_FALLBACK
 
 
 class InvestigateIn(BaseModel):
@@ -92,14 +105,77 @@ def _ingest_to_kb(sdk: UiPath, llm_token: str, base_url: str, input: Investigate
 async def _run(input: InvestigateIn) -> InvestigateOut:
     log.info(f"Starting investigation — team={input.team} process={input.process_name} transaction={input.transaction_id}")
 
-    pat, base_url = get_pat()
-    llm_token, _ = get_llm_token()
     sdk = UiPath()
+    support_handle = _get_support_handle(sdk)
+
+    try:
+        pat, base_url = get_pat()
+    except Exception as e:
+        log.error(f"Orchestrator auth failed: {e}")
+        return InvestigateOut(
+            diagnosis="Spectre could not authenticate with Orchestrator to retrieve logs.",
+            bot_name="Unknown",
+            confidence="Low",
+            error_found=False,
+            recommended_action=(
+                f"Please contact the RPA support team directly: {support_handle}\n"
+                f"Technical detail: Orchestrator PAT unavailable — {e}"
+            )
+        )
+
+    try:
+        llm_token, _ = get_llm_token()
+    except Exception as e:
+        log.error(f"LLM token acquisition failed: {e}")
+        return InvestigateOut(
+            diagnosis="Spectre could not obtain an LLM token and cannot run AI diagnosis.",
+            bot_name="Unknown",
+            confidence="Low",
+            error_found=False,
+            recommended_action=(
+                f"Please contact the RPA support team directly: {support_handle}\n"
+                f"Technical detail: LLM token unavailable — {e}"
+            )
+        )
 
     # Step 1: Fetch logs
     log.info("Fetching Orchestrator logs...")
     logs, log_source = fetch_logs(pat, base_url, input.transaction_id, input.process_name)
-    log.info(f"Logs fetched via '{log_source}' — {len(logs.splitlines())} lines")
+
+    if log_source == "Queue item status (not yet processed)":
+        log.info(f"Transaction '{input.transaction_id}' is queued but not yet processed — skipping LLM")
+        return InvestigateOut(
+            diagnosis=(
+                f"Transaction '{input.transaction_id}' is in the Orchestrator queue but has not been picked up by a robot yet. "
+                f"No logs are available until processing begins."
+            ),
+            bot_name="Unknown",
+            confidence="Low",
+            error_found=False,
+            recommended_action="Please check back once the bot has had time to process this transaction. If it remains unprocessed for an extended period, contact the RPA support team: " + support_handle
+        )
+
+    if logs == _TRANSACTION_NOT_FOUND:
+        log.warning(f"Transaction '{input.transaction_id}' not found in any Orchestrator folder")
+        return InvestigateOut(
+            diagnosis=(
+                f"Transaction ID '{input.transaction_id}' was not found in any Orchestrator queue. "
+                f"It may not have been submitted yet, or it may have been processed under a different reference."
+            ),
+            bot_name="Unknown",
+            confidence="Low",
+            error_found=False,
+            recommended_action=(
+                f"Please verify the transaction ID and resubmit if needed. "
+                f"If the issue persists, contact the RPA support team: {support_handle}"
+            )
+        )
+
+    logs_empty = not logs.strip()
+    if logs_empty:
+        log.warning(f"Logs fetched via '{log_source}' but content is empty — LLM will have no log context")
+    else:
+        log.info(f"Logs fetched via '{log_source}' — {len(logs.splitlines())} lines")
 
     # Step 2: Triage — classify issue type
     log.info("Triaging issue type...")
@@ -151,12 +227,19 @@ async def _run(input: InvestigateIn) -> InvestigateOut:
     except Exception as e:
         log.error(f"LLM diagnosis failed: {e}")
         return InvestigateOut(
-            diagnosis=f"LLM diagnosis failed: {str(e)}",
+            diagnosis="Spectre retrieved logs but the AI diagnosis step failed.",
             bot_name="Unknown",
             confidence="Low",
             error_found=False,
-            recommended_action="Contact support team"
+            recommended_action=(
+                f"Please contact the RPA support team directly: {support_handle}\n"
+                f"Technical detail: LLM diagnosis error — {e}"
+            )
         )
+
+    # Normalise confidence casing — LLM may return "high"/"medium"/"low"
+    if "confidence" in result:
+        result["confidence"] = result["confidence"].capitalize()
 
     # Step 6: Confidence loop — retry with targeted prompt if Low confidence
     if result.get("confidence") == "Low" and issue_type != "unknown":
@@ -174,6 +257,8 @@ async def _run(input: InvestigateIn) -> InvestigateOut:
                 issue_type=issue_type,
                 first_diagnosis=result,
             )
+            if "confidence" in targeted_result:
+                targeted_result["confidence"] = targeted_result["confidence"].capitalize()
             if targeted_result.get("confidence") in ("High", "Medium"):
                 log.info(f"Targeted retry improved confidence to {targeted_result.get('confidence')}")
                 result = targeted_result
@@ -181,6 +266,13 @@ async def _run(input: InvestigateIn) -> InvestigateOut:
                 log.info("Targeted retry did not improve confidence, keeping original")
         except Exception as e:
             log.warning(f"Targeted retry failed: {e}")
+
+    # Force Low confidence when the LLM had no meaningful context to work with
+    if logs_empty:
+        log.warning("Forcing confidence=Low because logs were empty")
+        result["confidence"] = "Low"
+    elif issue_type == "unknown" and result.get("confidence") == "Low":
+        log.warning("Confidence remains Low with unknown issue type — no targeted retry was possible")
 
     # Step 7: Ingest outcome to knowledge base for future reference
     if result.get("error_found"):

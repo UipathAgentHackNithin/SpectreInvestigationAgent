@@ -1,7 +1,7 @@
 import re
 import time
 import requests
-from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 try:
     from .logger import get_logger
 except ImportError:
@@ -56,6 +56,37 @@ def _find_folder_id(access_token: str, base_url: str, numeric_id: str) -> str | 
     except Exception:
         pass
     return None
+
+
+def _list_all_folders(access_token: str, base_url: str) -> list[dict]:
+    """Return all Orchestrator folders as a list of {Id, FullyQualifiedName} dicts."""
+    headers = {"Authorization": f"Bearer {access_token}"}
+    try:
+        resp = _get(
+            f"{base_url}/orchestrator_/odata/Folders",
+            headers=headers,
+            timeout=10
+        )
+        resp.raise_for_status()
+        return resp.json().get("value", [])
+    except Exception:
+        return []
+
+
+def _folder_has_transaction(access_token: str, base_url: str, folder_id: str, transaction_id: str) -> bool:
+    """Return True if any queue item in this folder has a Reference containing transaction_id."""
+    headers = _build_headers(access_token, folder_id)
+    try:
+        resp = _get(
+            f"{base_url}/orchestrator_/odata/QueueItems",
+            headers=headers,
+            params={"$filter": f"contains(Reference, '{transaction_id}')", "$top": 1},
+            timeout=10
+        )
+        resp.raise_for_status()
+        return bool(resp.json().get("value", []))
+    except Exception:
+        return False
 
 
 def _build_headers(access_token: str, folder_id: str | None) -> dict:
@@ -225,33 +256,55 @@ def _layer2_transaction_in_logs(access_token: str, base_url: str, headers: dict,
     return None, None
 
 
-def _layer3_todays_errors(access_token: str, base_url: str, headers: dict, process_name: str) -> str:
-    """Layer 3: Fallback — fetch today's error logs for performer/runner process."""
-    try:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
-        # Match performer or runner suffix — these do the actual transaction processing
-        filter_expr = (
-            f"(contains(ProcessName, 'Performer') or contains(ProcessName, 'Runner')) "
-            f"and Level eq 'Error' "
-            f"and TimeStamp ge {today}"
-        )
-        resp = _get(
-            f"{base_url}/orchestrator_/odata/RobotLogs",
-            headers=headers,
-            params={
-                "$filter": filter_expr,
-                "$orderby": "TimeStamp desc",
-                "$top": 20
-            },
-            timeout=10
-        )
-        resp.raise_for_status()
-        logs = resp.json().get("value", [])
-        if logs:
-            return _format_logs(logs)
-    except Exception:
-        pass
-    return f"No logs found for process '{process_name}' today."
+_TRANSACTION_NOT_FOUND = "__TRANSACTION_NOT_FOUND__"
+
+
+def _find_folder_with_transaction(access_token: str, base_url: str, transaction_id: str, folders: list[dict]) -> dict | None:
+    """Search all folders in parallel, return the first folder dict that contains transaction_id."""
+    valid_folders = [f for f in folders if f.get("Id")]
+    if not valid_folders:
+        return None
+    with ThreadPoolExecutor(max_workers=min(10, len(valid_folders))) as executor:
+        futures = {
+            executor.submit(_folder_has_transaction, access_token, base_url, str(f["Id"]), transaction_id): f
+            for f in valid_folders
+        }
+        for future in as_completed(futures):
+            if future.result():
+                return futures[future]
+    return None
+
+
+def _layer3_all_folders_fallback(access_token: str, base_url: str, transaction_id: str, process_name: str) -> tuple[str | None, str | None]:
+    """Layer 3: Search every Orchestrator folder in parallel for transaction_id in queue items.
+
+    Returns (result, source_label) or (_TRANSACTION_NOT_FOUND, None) if not found anywhere.
+    If found, runs Layer 1 (queue lookup) scoped to that folder.
+    """
+    log.info("Layer 3: Searching all folders in parallel for transaction_id in queue items...")
+    folders = _list_all_folders(access_token, base_url)
+    if not folders:
+        log.warning("Layer 3: Could not retrieve folder list")
+        return _TRANSACTION_NOT_FOUND, None
+
+    folder = _find_folder_with_transaction(access_token, base_url, transaction_id, folders)
+    if not folder:
+        log.warning(f"Layer 3: Transaction '{transaction_id}' not found in any folder")
+        return _TRANSACTION_NOT_FOUND, None
+
+    folder_id = str(folder["Id"])
+    folder_name = folder.get("FullyQualifiedName", folder_id)
+    log.info(f"Layer 3: Found transaction in folder '{folder_name}' (id={folder_id})")
+    headers = _build_headers(access_token, folder_id)
+    result, source = _layer1_queue(access_token, base_url, headers, transaction_id, process_name)
+    if result:
+        return result, f"All-folders fallback → folder '{folder_name}'"
+    # Item found but Layer 1 returned nothing (in-progress or no timestamps) — still report
+    return (
+        f"Transaction '{transaction_id}' was found in Orchestrator folder '{folder_name}' "
+        f"but no log window could be extracted (item may still be in progress).",
+        f"All-folders fallback → folder '{folder_name}' (no log window)"
+    )
 
 
 def fetch_recent_failures(access_token: str, base_url: str, process_name: str, exclude_transaction_id: str) -> list[str]:
@@ -285,6 +338,7 @@ def fetch_logs(access_token: str, base_url: str, transaction_id: str, process_na
     """Fetch Orchestrator logs using a 3-layer fallback strategy.
 
     Returns (logs, source_label) where source_label describes which layer succeeded.
+    If the transaction is not found anywhere, returns (_TRANSACTION_NOT_FOUND, "not_found").
     """
     numeric_id = _extract_numeric_id(process_name)
     log.info(f"Looking up folder for process numeric ID: {numeric_id}")
@@ -292,7 +346,7 @@ def fetch_logs(access_token: str, base_url: str, transaction_id: str, process_na
     if folder_id:
         log.info(f"Found folder ID: {folder_id}")
     else:
-        log.warning(f"No folder found for numeric ID: {numeric_id}, using default folder")
+        log.warning(f"No folder found for numeric ID: {numeric_id}, will search all folders if needed")
     headers = _build_headers(access_token, folder_id)
 
     log.info(f"Trying Layer 1: Queue transaction lookup for transaction_id={transaction_id}")
@@ -307,6 +361,13 @@ def fetch_logs(access_token: str, base_url: str, transaction_id: str, process_na
         log.info(f"Layer 2 resolved: {source}")
         return result, source
 
-    log.warning("Layers 1 & 2 found nothing, falling back to Layer 3: Today's error logs")
-    fallback = _layer3_todays_errors(access_token, base_url, headers, process_name)
-    return fallback, "Today's error logs fallback (broad - not scoped to this transaction)"
+    if not folder_id:
+        log.warning("Folder not identified from process name — running Layer 3: all-folders search")
+        result, source = _layer3_all_folders_fallback(access_token, base_url, transaction_id, process_name)
+        if result == _TRANSACTION_NOT_FOUND:
+            return _TRANSACTION_NOT_FOUND, "not_found"
+        log.info(f"Layer 3 resolved: {source}")
+        return result, source
+
+    log.warning(f"Folder found but transaction '{transaction_id}' not in its logs or queue — transaction not found")
+    return _TRANSACTION_NOT_FOUND, "not_found"
