@@ -1,8 +1,8 @@
 {
-  "transaction_id": "INV-98768",
-  "description": "Failed with a SAP login error",
-  "team": "Finace",
-  "process_name": "3201",
+  "transaction_id": "INV-98773",
+  "description": "Invoice from TechSupplies Ltd for $3205 is stuck and not getting processed. Can someone look into it?",
+  "team": "Finance",
+  "process_name": "ICSAUTO-3201 Invoice Processing",
   "channel_id": "C123",
-  "thread_ts": "123.456"
+  "thread_ts": "1234567890.456"
 }

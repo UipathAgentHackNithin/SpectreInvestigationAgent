@@ -4,7 +4,7 @@
     "entryPoints": [
         {
             "filePath": "investigate",
-            "uniqueId": "786ba8e5-aba4-4ce8-b603-88fda0b96dbc",
+            "uniqueId": "6ab71911-800a-4a89-8c79-3ebfa03c670d",
             "type": "function",
             "input": {
                 "type": "object",
@@ -65,6 +65,11 @@
                     },
                     "recommended_action": {
                         "title": "Recommended Action",
+                        "type": "string"
+                    },
+                    "issue_type": {
+                        "default": "unknown",
+                        "title": "Issue Type",
                         "type": "string"
                     }
                 },

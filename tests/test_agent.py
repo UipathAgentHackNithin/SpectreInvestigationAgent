@@ -51,6 +51,7 @@ class TestInvestigate:
         assert result.diagnosis == "Login timeout due to slow network"
         assert result.bot_name == "FinanceBot"
         assert result.error_found is True
+        assert result.issue_type == "credentials"
 
     async def test_defaults_on_missing_llm_fields(self):
         with patch("spectre.agent.get_pat", return_value=("fake_pat", "https://example.com")), \
@@ -75,6 +76,7 @@ class TestInvestigate:
         assert result.diagnosis == "Unable to diagnose"
         assert result.bot_name == "Unknown"
         assert result.error_found is False
+        assert result.issue_type == "unknown"
 
     async def test_confidence_loop_triggers_targeted_retry(self):
         """When diagnose returns Low confidence and issue_type is known, targeted retry is called."""
@@ -241,6 +243,68 @@ class TestInvestigate:
 
         call_kwargs = diagnosis_mock.call_args.kwargs
         assert "TXN-100" in call_kwargs["cross_transaction_summary"]
+
+    async def test_business_exception_issue_type_surfaced(self):
+        """Business exception triage result must be surfaced in issue_type output field."""
+        with patch("spectre.agent.get_pat", return_value=("fake_pat", "https://example.com")), \
+             patch("spectre.agent.get_llm_token", return_value=("fake_llm_token", "https://example.com")), \
+             patch("spectre.agent.UiPath", return_value=MagicMock()), \
+             patch("spectre.agent._search_kb", return_value=""), \
+             patch("spectre.agent._ingest_to_kb"), \
+             patch("spectre.agent.fetch_logs", return_value=("BusinessRuleException: Invoice amount exceeds limit", "Queue transaction window")), \
+             patch("spectre.agent.triage", new=AsyncMock(return_value={"issue_type": "business_exception", "triage_notes": "data validation failure"})), \
+             patch("spectre.agent.fetch_recent_failures", return_value=[]), \
+             patch("spectre.agent.diagnose", new=AsyncMock(return_value={
+                 "diagnosis": "BusinessRuleException: invoice amount exceeds the approved limit of 10000",
+                 "bot_name": "InvoiceBot",
+                 "confidence": "High",
+                 "error_found": True,
+                 "recommended_action": "Review the invoice amount with the approver and resubmit"
+             })):
+
+            result = await investigate(InvestigateIn(
+                transaction_id="TXN-010",
+                description="Invoice processing failed with business rule error",
+                team="Finance",
+                process_name="ICSAUTO-3201 Invoice Processing",
+                channel_id="C123",
+                thread_ts="123.456"
+            ))
+
+        assert result.issue_type == "business_exception"
+        assert result.error_found is True
+        # Maestro should NOT route this to CodingAgent — routing condition: issue_type == "business_exception"
+
+    async def test_issue_type_preserved_on_system_error(self):
+        """system_error issue_type must be surfaced so Maestro can route to CodingAgent."""
+        with patch("spectre.agent.get_pat", return_value=("fake_pat", "https://example.com")), \
+             patch("spectre.agent.get_llm_token", return_value=("fake_llm_token", "https://example.com")), \
+             patch("spectre.agent.UiPath", return_value=MagicMock()), \
+             patch("spectre.agent._search_kb", return_value=""), \
+             patch("spectre.agent._ingest_to_kb"), \
+             patch("spectre.agent.fetch_logs", return_value=("NullReferenceException at ParseResponse", "Queue transaction window")), \
+             patch("spectre.agent.triage", new=AsyncMock(return_value={"issue_type": "system_error", "triage_notes": "null ref crash"})), \
+             patch("spectre.agent.fetch_recent_failures", return_value=[]), \
+             patch("spectre.agent.diagnose", new=AsyncMock(return_value={
+                 "diagnosis": "NullReferenceException in ParseResponse activity",
+                 "bot_name": "InvoiceBot",
+                 "confidence": "High",
+                 "error_found": True,
+                 "recommended_action": "Add null check before parsing API response"
+             })):
+
+            result = await investigate(InvestigateIn(
+                transaction_id="TXN-011",
+                description="Bot crashed with null reference",
+                team="Finance",
+                process_name="ICSAUTO-3201 Invoice Processing",
+                channel_id="C123",
+                thread_ts="123.456"
+            ))
+
+        assert result.issue_type == "system_error"
+        assert result.error_found is True
+        # Maestro should route this to CodingAgent — error_found=True and issue_type != "business_exception"
 
 
 class TestFailurePaths:

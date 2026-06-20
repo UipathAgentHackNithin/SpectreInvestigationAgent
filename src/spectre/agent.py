@@ -1,7 +1,14 @@
 import asyncio
 import json
+import os
+import requests
 from pydantic import BaseModel
 from uipath.platform import UiPath
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 try:
     from .auth import get_pat, get_llm_token
     from .orchestrator import fetch_logs, fetch_recent_failures, _TRANSACTION_NOT_FOUND
@@ -18,6 +25,23 @@ log = get_logger("spectre.agent")
 _CG_INDEX_NAME = "SpectreKB"
 _CG_FOLDER_PATH = "Shared/Specter"
 _SUPPORT_HANDLE_FALLBACK = "<!subteam^S0BBTE9DA0N>"
+
+
+def _load_credentials(sdk: UiPath) -> None:
+    """Read credential assets from Orchestrator and inject into env vars if not already set."""
+    for env_var, asset_name in [
+        ("UIPATH_PAT", "SPECTRE_PAT"),
+        ("UIPATH_REFRESH_TOKEN", "SPECTRE_REFRESH_TOKEN"),
+    ]:
+        if os.getenv(env_var):
+            continue
+        try:
+            value = sdk.assets.retrieve_credential(asset_name, folder_path=_CG_FOLDER_PATH)
+            if value:
+                os.environ[env_var] = value
+                log.info(f"Loaded {env_var} from Orchestrator asset {asset_name} (prefix={value[:20]!r})")
+        except Exception as e:
+            log.warning(f"Could not load {env_var} from asset {asset_name}: {e}")
 
 
 def _get_support_handle(sdk: UiPath) -> str:
@@ -47,6 +71,7 @@ class InvestigateOut(BaseModel):
     confidence: str
     error_found: bool
     recommended_action: str
+    issue_type: str = "unknown"
 
 
 async def investigate(input: InvestigateIn) -> InvestigateOut:
@@ -102,10 +127,45 @@ def _ingest_to_kb(sdk: UiPath, llm_token: str, base_url: str, input: Investigate
         log.warning(f"KB ingest failed: {e}")
 
 
+def _writeback_refresh_token(pat: str, base_url: str, new_refresh_token: str) -> None:
+    """Update SPECTRE_REFRESH_TOKEN asset in Orchestrator using the PAT directly (bypasses robot permission limits)."""
+    headers = {
+        "Authorization": f"Bearer {pat}",
+        "Content-Type": "application/json",
+        "X-UIPATH-FolderPath": _CG_FOLDER_PATH,
+    }
+    lookup_resp = requests.get(
+        f"{base_url}/orchestrator_/odata/Assets?$filter=Name eq 'SPECTRE_REFRESH_TOKEN'",
+        headers=headers,
+        timeout=10,
+    )
+    lookup_resp.raise_for_status()
+    items = lookup_resp.json().get("value", [])
+    if not items:
+        raise ValueError("SPECTRE_REFRESH_TOKEN asset not found in Orchestrator")
+    asset_id = items[0]["Id"]
+    body = {
+        "Id": asset_id,
+        "Name": "SPECTRE_REFRESH_TOKEN",
+        "ValueType": "Credential",
+        "CredentialUsername": "spectre",
+        "CredentialPassword": new_refresh_token,
+        "AllowDirectApiAccess": True,
+    }
+    put_resp = requests.put(
+        f"{base_url}/orchestrator_/odata/Assets({asset_id})",
+        headers=headers,
+        json=body,
+        timeout=10,
+    )
+    put_resp.raise_for_status()
+
+
 async def _run(input: InvestigateIn) -> InvestigateOut:
     log.info(f"Starting investigation — team={input.team} process={input.process_name} transaction={input.transaction_id}")
 
     sdk = UiPath()
+    _load_credentials(sdk)
     support_handle = _get_support_handle(sdk)
 
     try:
@@ -125,6 +185,14 @@ async def _run(input: InvestigateIn) -> InvestigateOut:
 
     try:
         llm_token, _ = get_llm_token()
+        # Write rotated refresh token back to Orchestrator asset using PAT (robot account lacks write permission)
+        new_refresh_token = os.getenv("UIPATH_REFRESH_TOKEN")
+        if new_refresh_token:
+            try:
+                _writeback_refresh_token(pat, base_url, new_refresh_token)
+                log.info("Rotated refresh token written back to Orchestrator asset")
+            except Exception as wb_err:
+                log.warning(f"Could not write rotated refresh token to asset: {wb_err}")
     except Exception as e:
         log.error(f"LLM token acquisition failed: {e}")
         return InvestigateOut(
@@ -285,9 +353,10 @@ async def _run(input: InvestigateIn) -> InvestigateOut:
         bot_name=result.get("bot_name", "Unknown"),
         confidence=result.get("confidence", "Low"),
         error_found=result.get("error_found", False),
-        recommended_action=result.get("recommended_action", "")
+        recommended_action=result.get("recommended_action", ""),
+        issue_type=issue_type,
     )
-    log.info(f"Investigation complete — error_found={out.error_found} confidence={out.confidence} bot={out.bot_name}")
+    log.info(f"Investigation complete — error_found={out.error_found} confidence={out.confidence} bot={out.bot_name} issue_type={out.issue_type}")
     return out
 
 

@@ -59,9 +59,24 @@ SpectreInvestigationAgent
   "bot_name": "InvoiceProcessing_Performer",
   "confidence": "High",
   "error_found": true,
-  "recommended_action": "Rotate the SAP credential asset in Orchestrator and retry"
+  "recommended_action": "Rotate the SAP credential asset in Orchestrator and retry",
+  "issue_type": "credentials"
 }
 ```
+
+| Field | Values | Description |
+|---|---|---|
+| `issue_type` | `credentials` / `timeout` / `business_exception` / `system_error` / `unknown` | Triage classification — use this in Maestro to route between CodingAgent and user escalation |
+
+### Maestro routing logic
+
+```
+error_found=True  AND issue_type != "business_exception"  → SpectreCodingAgent (code fix)
+error_found=True  AND issue_type == "business_exception"  → escalate to user (data/business rule issue)
+error_found=False                                          → escalate to user (no error found)
+```
+
+Business exceptions (data validation failures, missing data, business rule violations) cannot be fixed by patching XAML — they require end-user action on the data. CodingAgent should not be invoked for these.
 
 ## Local Setup
 
@@ -75,18 +90,31 @@ uv run uipath run main '{"transaction_id": "INV-001", "description": "...", "tea
 
 | Variable | Required | Description |
 |---|---|---|
-| `UIPATH_PAT` | Yes (local) | Personal Access Token for Orchestrator API calls |
+| `UIPATH_PAT` | Yes (local) | Personal Access Token for Orchestrator API calls — loaded from `SPECTRE_PAT` credential asset on robot |
+| `UIPATH_REFRESH_TOKEN` | Yes (local) | Refresh token for LLM Gateway — loaded from `SPECTRE_REFRESH_TOKEN` credential asset on robot |
 | `UIPATH_URL` | No | Orchestrator base URL (defaults to staging tenant) |
-| `UIPATH_ACCESS_TOKEN` | Yes (robot) | Injected by UiPath at runtime |
 | `SPECTRE_FOLDER_ID` | No | Orchestrator folder ID for Spectre assets (defaults to `3087542`) — override when deploying to a different tenant |
+
+> On robot runtime, `UIPATH_PAT` and `UIPATH_REFRESH_TOKEN` are **not** set as env vars — they are read at startup from Orchestrator credential assets via `sdk.assets.retrieve_credential()`. `UIPATH_ACCESS_TOKEN` is no longer used.
 
 ## Orchestrator Assets
 
-| Asset | Folder | Description |
-|---|---|---|
-| `SpectrePAT` | `Shared/Specter` | Personal Access Token used for Orchestrator API calls on robot |
-| `SpectreRefreshToken` | `Shared/Specter` | Refresh token exchanged for an LLM-scoped JWT |
-| `SPECTRE_SUPPORT_HANDLE` | `Shared/Specter` | Slack user group tag for support contact (e.g. `<!subteam^S0BBTE9DA0N>`) — rendered as `@rpa-support` in failure messages |
+| Asset | Type | Folder | Description |
+|---|---|---|---|
+| `SPECTRE_PAT` | Credential | `Shared/Specter` | Personal Access Token for Orchestrator API calls — read at agent startup |
+| `SPECTRE_REFRESH_TOKEN` | Credential | `Shared/Specter` | Refresh token exchanged for an LLM-scoped JWT — read and written back at runtime |
+| `SPECTRE_SUPPORT_HANDLE` | Text | `Shared/Specter` | Slack user group tag for support contact (e.g. `<!subteam^S0BBTE9DA0N>`) — rendered as `@rpa-support` in failure messages |
+
+> All credential assets must have **AllowDirectApiAccess** enabled in Orchestrator UI.
+
+### Refreshing the LLM token
+
+The agent **self-rotates** the refresh token on every run — the rotated token is automatically written back to the `SPECTRE_REFRESH_TOKEN` Orchestrator asset via PAT, so no manual refresh is needed for normal operation.
+
+Run `refresh_token.ps1` from the project root only after publishing a new version to Orchestrator (publishing invalidates the current token):
+1. Forces a fresh `uipath auth` login to obtain a new refresh token
+2. Updates `.env` locally with the new tokens (no BOM)
+3. Looks up the `SPECTRE_REFRESH_TOKEN` asset ID dynamically and writes the new token back as a Credential asset
 
 ## Running Tests
 
@@ -107,7 +135,7 @@ src/spectre/
   agent.py          — main orchestration (7-step pipeline)
   orchestrator.py   — Orchestrator API calls with 3-layer log fetch and retry
   llm.py            — LLM calls (triage, diagnose, diagnose_targeted) with response validation
-  auth.py           — token management (local .auth.json + robot asset fallback)
+  auth.py           — token management (reads UIPATH_PAT and UIPATH_REFRESH_TOKEN from env; self-rotates refresh token)
   logger.py         — structured logging
 
 evaluations/
