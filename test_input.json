@@ -1,8 +1,8 @@
 {
-  "transaction_id": "INV-98773",
-  "description": "Invoice from TechSupplies Ltd for $3205 is stuck and not getting processed. Can someone look into it?",
+  "transaction_id": "INV-98774",
+  "description": "Invoice from TechSupplies Ltd for $1250.50 is stuck and not getting processed. Can someone look into it?",
   "team": "Finance",
-  "process_name": "ICSAUTO-3201 Invoice Processing",
+  "process_name": "3201",
   "channel_id": "C123",
   "thread_ts": "1234567890.456"
 }

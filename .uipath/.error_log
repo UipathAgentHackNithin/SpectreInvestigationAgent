@@ -596,3 +596,42 @@
     }
   }
 ]
+
+--- Authentication Error Log 2026-06-21 12:48:50 ---
+[
+  {
+    "timestamp": "2026-06-21T07:18:49.360Z",
+    "message": "Authentication started",
+    "params": {
+      "code": "ad89db7f-af81-463f-865d-6c373f2feb96.5E9E10D529FA1930B58C643428C58086668F9D3E8E436FDCA7155F51EB32D87F",
+      "state": "2EMlyDHVNlcqfSvJIplLtLJ_kEnJb81xk2o3sU6tQhQ",
+      "iss": "https://staging.uipath.com/identity_"
+    }
+  }
+]
+
+--- Authentication Error Log 2026-06-21 19:20:54 ---
+[
+  {
+    "timestamp": "2026-06-21T13:50:53.793Z",
+    "message": "Authentication started",
+    "params": {
+      "code": "ad89db7f-af81-463f-865d-6c373f2feb96.94EC040D4330B4510749CB0D82C14401EBA43331C8E40635DA5A1AE7B0748157",
+      "state": "XzH0Pcu-kABqWtYgDaIXXkbqc7qe3Ws-tVH4-WfJ_lw",
+      "iss": "https://staging.uipath.com/identity_"
+    }
+  }
+]
+
+--- Authentication Error Log 2026-06-22 13:47:55 ---
+[
+  {
+    "timestamp": "2026-06-22T08:17:55.005Z",
+    "message": "Authentication started",
+    "params": {
+      "code": "ad89db7f-af81-463f-865d-6c373f2feb96.D546E3C479F5CF10E19392D5B869C1FB2F89C4307517249ED663FFC43469AEFA",
+      "state": "0GRxjVONRHTTIAJqQAopndUDqPSZ2GAcq9CCryhMepE",
+      "iss": "https://staging.uipath.com/identity_"
+    }
+  }
+]

@@ -28,11 +28,12 @@ SpectreInvestigationAgent
 
 ## How It Works
 
-1. **Fetch logs** — 3-layer fallback strategy:
-   - Layer 1: Queue item timestamps — finds the transaction in its folder, uses start/end timestamps for a precise log window
-   - Layer 2: Transaction ID in log messages — searches logs for the reference, bounded by the job window if a Performer logged it
-   - Layer 3: All-folders parallel search — when the folder can't be identified from the process name, all Orchestrator folders are searched concurrently for the transaction ID
-   - If the transaction is not found in any folder, the agent returns an early exit with a user-friendly message — no LLM call is made
+1. **Fetch logs** — 3-layer fallback strategy, all scoped to the resolved folder:
+   - **Folder resolution** — numeric ID extracted from process name → keyword fallback → best-match across all folders; without a folder, Orchestrator calls have no scope, so resolution failure is treated as a hard blocker
+   - Layer 1: Queue item by Reference — uses start/end timestamps for a precise log window
+   - Layer 2: Transaction ID in log messages — bounded by JobKey + "Transaction Ended" marker (performer jobs only; dispatcher falls through)
+   - Layer 3: SpecificContent parallel search — one thread per status (Failed / New / InProgress) fetches the 20 most-recent queue items each and filters SpecificContent in Python (OData does not support filtering on large data fields); returns status-aware messages for New/InProgress items
+   - If the transaction is not found in any layer, the agent returns an early exit with a user-friendly message — no LLM call is made
 2. **Triage** — LLM classifies issue type: `credentials`, `timeout`, `business_exception`, `system_error`, or `unknown`
 3. **KB search** — searches SpectreKB context grounding index for similar past incidents
 4. **Cross-transaction analysis** — checks if other transactions in the same process also failed (systemic issue detection)

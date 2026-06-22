@@ -39,22 +39,83 @@ def _extract_numeric_id(process_name: str) -> str | None:
     return match.group() if match else None
 
 
-def _find_folder_id(access_token: str, base_url: str, numeric_id: str) -> str | None:
-    """Find Orchestrator folder ID whose name contains the numeric process ID."""
+def _extract_keyword(process_name: str) -> str | None:
+    """Extract a meaningful keyword from process name for folder search fallback.
+
+    e.g. 'ICSAUTO-3201 Invoice Processing Performer' -> 'Invoice'
+    Strips numeric tokens, short tokens, and common UiPath suffixes.
+    """
+    _STOP_WORDS = {"performer", "runner", "dispatcher", "bot", "process", "processing", "automation"}
+    parts = re.split(r'[\s\-_]+', process_name)
+    for part in parts:
+        clean = re.sub(r'\d+', '', part).strip()
+        if len(clean) >= 4 and clean.lower() not in _STOP_WORDS:
+            return clean
+    return None
+
+
+def _find_folder_id(access_token: str, base_url: str, numeric_id: str | None, process_name: str = "") -> str | None:
+    """Find Orchestrator folder ID whose name contains the numeric process ID.
+
+    Fallback 1: search by keyword extracted from process name.
+    Fallback 2: return the first folder from all-folders list whose name best matches process name.
+    """
     headers = {"Authorization": f"Bearer {access_token}"}
-    try:
-        resp = _get(
-            f"{base_url}/orchestrator_/odata/Folders",
-            headers=headers,
-            params={"$filter": f"contains(FullyQualifiedName, '{numeric_id}')"},
-            timeout=10
-        )
-        resp.raise_for_status()
-        folders = resp.json().get("value", [])
-        if folders:
-            return str(folders[0]["Id"])
-    except Exception:
-        pass
+
+    # Primary: numeric ID search
+    if numeric_id:
+        try:
+            resp = _get(
+                f"{base_url}/orchestrator_/odata/Folders",
+                headers=headers,
+                params={"$filter": f"contains(FullyQualifiedName, '{numeric_id}')"},
+                timeout=10
+            )
+            resp.raise_for_status()
+            folders = resp.json().get("value", [])
+            if folders:
+                return str(folders[0]["Id"])
+        except Exception:
+            pass
+
+    # Fallback 1: keyword search
+    keyword = _extract_keyword(process_name) if process_name else None
+    if keyword:
+        try:
+            resp = _get(
+                f"{base_url}/orchestrator_/odata/Folders",
+                headers=headers,
+                params={"$filter": f"contains(FullyQualifiedName, '{keyword}')"},
+                timeout=10
+            )
+            resp.raise_for_status()
+            folders = resp.json().get("value", [])
+            if folders:
+                log.info(f"Folder found via keyword fallback '{keyword}': {folders[0].get('FullyQualifiedName')}")
+                return str(folders[0]["Id"])
+        except Exception:
+            pass
+
+    # Fallback 2: all folders, pick closest name match
+    if process_name:
+        all_folders = _list_all_folders(access_token, base_url)
+        if all_folders:
+            process_lower = process_name.lower()
+            best = max(
+                all_folders,
+                key=lambda f: sum(
+                    1 for word in re.split(r'\W+', process_lower)
+                    if len(word) >= 3 and word in f.get("FullyQualifiedName", "").lower()
+                )
+            )
+            score = sum(
+                1 for word in re.split(r'\W+', process_lower)
+                if len(word) >= 3 and word in best.get("FullyQualifiedName", "").lower()
+            )
+            if score > 0:
+                log.info(f"Folder found via best-match fallback (score={score}): {best.get('FullyQualifiedName')}")
+                return str(best["Id"])
+
     return None
 
 
@@ -71,22 +132,6 @@ def _list_all_folders(access_token: str, base_url: str) -> list[dict]:
         return resp.json().get("value", [])
     except Exception:
         return []
-
-
-def _folder_has_transaction(access_token: str, base_url: str, folder_id: str, transaction_id: str) -> bool:
-    """Return True if any queue item in this folder has a Reference containing transaction_id."""
-    headers = _build_headers(access_token, folder_id)
-    try:
-        resp = _get(
-            f"{base_url}/orchestrator_/odata/QueueItems",
-            headers=headers,
-            params={"$filter": f"contains(Reference, '{transaction_id}')", "$top": 1},
-            timeout=10
-        )
-        resp.raise_for_status()
-        return bool(resp.json().get("value", []))
-    except Exception:
-        return False
 
 
 def _build_headers(access_token: str, folder_id: str | None) -> dict:
@@ -110,10 +155,11 @@ def _format_logs(logs: list) -> str:
 
 _NEW_STATUSES = {"New", "Retried"}
 _INPROGRESS_STATUSES = {"InProgress"}
+_TRANSACTION_NOT_FOUND = "__TRANSACTION_NOT_FOUND__"
 
 
 def _layer1_queue(access_token: str, base_url: str, headers: dict, transaction_id: str, process_name: str) -> tuple[str | None, str | None]:
-    """Layer 1: Find transaction in queue, use start/end timestamps to fetch logs.
+    """Layer 1: Find transaction in queue by Reference, use start/end timestamps to fetch logs.
 
     Returns (result, source_label):
       - (message, "Queue item status") — item found but not yet processed; stop fallback
@@ -256,61 +302,127 @@ def _layer2_transaction_in_logs(access_token: str, base_url: str, headers: dict,
     return None, None
 
 
-_TRANSACTION_NOT_FOUND = "__TRANSACTION_NOT_FOUND__"
+def _search_specific_content_by_status(
+    access_token: str,
+    base_url: str,
+    headers: dict,
+    transaction_id: str,
+    status: str,
+) -> dict | None:
+    """Fetch queue items with the given status and search SpecificContent for transaction_id in Python.
 
-
-def _find_folder_with_transaction(access_token: str, base_url: str, transaction_id: str, folders: list[dict]) -> dict | None:
-    """Search all folders in parallel, return the first folder dict that contains transaction_id."""
-    valid_folders = [f for f in folders if f.get("Id")]
-    if not valid_folders:
-        return None
-    with ThreadPoolExecutor(max_workers=min(10, len(valid_folders))) as executor:
-        futures = {
-            executor.submit(_folder_has_transaction, access_token, base_url, str(f["Id"]), transaction_id): f
-            for f in valid_folders
-        }
-        for future in as_completed(futures):
-            if future.result():
-                return futures[future]
+    OData does not support filtering on SpecificContent (large data field) — filter client-side.
+    Returns the first matching queue item dict, or None.
+    """
+    try:
+        resp = _get(
+            f"{base_url}/orchestrator_/odata/QueueItems",
+            headers=headers,
+            params={
+                "$filter": f"Status eq '{status}'",
+                "$orderby": "EndProcessing desc",
+                "$top": 20,
+            },
+            timeout=10
+        )
+        resp.raise_for_status()
+        items = resp.json().get("value", [])
+        for item in items:
+            specific = item.get("SpecificContent") or item.get("SpecificData") or ""
+            if isinstance(specific, dict):
+                specific = str(specific)
+            if transaction_id in specific:
+                return item
+    except Exception:
+        pass
     return None
 
 
-def _layer3_all_folders_fallback(access_token: str, base_url: str, transaction_id: str, process_name: str) -> tuple[str | None, str | None]:
-    """Layer 3: Search every Orchestrator folder in parallel for transaction_id in queue items.
+def _layer3_specific_content(
+    access_token: str,
+    base_url: str,
+    headers: dict,
+    transaction_id: str,
+    process_name: str,
+) -> tuple[str | None, str | None]:
+    """Layer 3: Search queue items across all statuses in parallel via SpecificContent.
 
-    Returns (result, source_label) or (_TRANSACTION_NOT_FOUND, None) if not found anywhere.
-    If found, runs Layer 1 (queue lookup) scoped to that folder.
+    OData filtering on SpecificContent is not supported — fetch by status and filter in Python.
+    Spins up one thread per status (Failed, New, InProgress) for parallelism.
+    If found, attempts to fetch logs via Layer 1 timestamps (Failed items only).
+
+    Returns (result, source_label) or (None, None).
     """
-    log.info("Layer 3: Searching all folders in parallel for transaction_id in queue items...")
-    folders = _list_all_folders(access_token, base_url)
-    if not folders:
-        log.warning("Layer 3: Could not retrieve folder list")
-        return _TRANSACTION_NOT_FOUND, None
+    statuses = ["Failed", "New", "InProgress"]
 
-    folder = _find_folder_with_transaction(access_token, base_url, transaction_id, folders)
-    if not folder:
-        log.warning(f"Layer 3: Transaction '{transaction_id}' not found in any folder")
-        return _TRANSACTION_NOT_FOUND, None
+    found_item: dict | None = None
+    found_status: str | None = None
 
-    folder_id = str(folder["Id"])
-    folder_name = folder.get("FullyQualifiedName", folder_id)
-    log.info(f"Layer 3: Found transaction in folder '{folder_name}' (id={folder_id})")
-    headers = _build_headers(access_token, folder_id)
-    result, source = _layer1_queue(access_token, base_url, headers, transaction_id, process_name)
-    if result:
-        return result, f"All-folders fallback → folder '{folder_name}'"
-    # Item found but Layer 1 returned nothing (in-progress or no timestamps) — still report
+    with ThreadPoolExecutor(max_workers=len(statuses)) as executor:
+        futures = {
+            executor.submit(
+                _search_specific_content_by_status,
+                access_token, base_url, headers, transaction_id, status
+            ): status
+            for status in statuses
+        }
+        for future in as_completed(futures):
+            item = future.result()
+            if item and found_item is None:
+                found_item = item
+                found_status = futures[future]
+
+    if found_item is None:
+        return None, None
+
+    status = found_item.get("Status", found_status or "")
+
+    if status in _NEW_STATUSES:
+        return (
+            f"Transaction found in queue SpecificContent with status '{status}' — "
+            f"the bot has not processed this transaction yet. No logs available until a robot picks it up.",
+            "SpecificContent search (not yet processed)"
+        )
+
+    if status in _INPROGRESS_STATUSES:
+        return (
+            f"Transaction found in queue SpecificContent with status 'InProgress' — "
+            f"currently being processed. No complete logs available yet.",
+            "SpecificContent search (in progress)"
+        )
+
+    # Failed — attempt to get logs via timestamps
+    start_ts = found_item.get("StartProcessing")
+    end_ts = found_item.get("EndProcessing")
+    if start_ts:
+        log_filter = f"TimeStamp ge {start_ts}"
+        if end_ts:
+            log_filter += f" and TimeStamp le {end_ts}"
+        try:
+            resp = _get(
+                f"{base_url}/orchestrator_/odata/RobotLogs",
+                headers=headers,
+                params={"$filter": log_filter, "$orderby": "TimeStamp asc", "$top": 50},
+                timeout=10
+            )
+            resp.raise_for_status()
+            logs = resp.json().get("value", [])
+            if logs:
+                return _format_logs(logs), "SpecificContent search → log window from timestamps"
+        except Exception:
+            pass
+
     return (
-        f"Transaction '{transaction_id}' was found in Orchestrator folder '{folder_name}' "
-        f"but no log window could be extracted (item may still be in progress).",
-        f"All-folders fallback → folder '{folder_name}' (no log window)"
+        f"Transaction found in queue SpecificContent with status '{status}' "
+        f"but no log window could be extracted.",
+        "SpecificContent search (no log window)"
     )
 
 
 def fetch_recent_failures(access_token: str, base_url: str, process_name: str, exclude_transaction_id: str) -> list[str]:
     """Fetch other recent failed transactions in the same process queue (cross-transaction analysis)."""
     numeric_id = _extract_numeric_id(process_name)
-    folder_id = _find_folder_id(access_token, base_url, numeric_id) if numeric_id else None
+    folder_id = _find_folder_id(access_token, base_url, numeric_id, process_name)
     headers = _build_headers(access_token, folder_id)
     try:
         resp = _get(
@@ -337,19 +449,23 @@ def fetch_recent_failures(access_token: str, base_url: str, process_name: str, e
 def fetch_logs(access_token: str, base_url: str, transaction_id: str, process_name: str) -> tuple[str, str]:
     """Fetch Orchestrator logs using a 3-layer fallback strategy.
 
+    Layer 1: Queue item by Reference — uses start/end timestamps for a precise log window.
+    Layer 2: Transaction ID in log messages — bounded by JobKey + Transaction Ended marker.
+    Layer 3: SpecificContent parallel search — fetches items by status, filters in Python.
+
     Returns (logs, source_label) where source_label describes which layer succeeded.
-    If the transaction is not found anywhere, returns (_TRANSACTION_NOT_FOUND, "not_found").
+    If not found, returns (_TRANSACTION_NOT_FOUND, "not_found").
     """
     numeric_id = _extract_numeric_id(process_name)
-    log.info(f"Looking up folder for process numeric ID: {numeric_id}")
-    folder_id = _find_folder_id(access_token, base_url, numeric_id) if numeric_id else None
+    log.info(f"Looking up folder for process: '{process_name}' (numeric_id={numeric_id})")
+    folder_id = _find_folder_id(access_token, base_url, numeric_id, process_name)
     if folder_id:
         log.info(f"Found folder ID: {folder_id}")
     else:
-        log.warning(f"No folder found for numeric ID: {numeric_id}, will search all folders if needed")
+        log.warning(f"No folder found for process '{process_name}' — proceeding without folder scope")
     headers = _build_headers(access_token, folder_id)
 
-    log.info(f"Trying Layer 1: Queue transaction lookup for transaction_id={transaction_id}")
+    log.info(f"Trying Layer 1: Queue Reference lookup for transaction_id={transaction_id}")
     result, source = _layer1_queue(access_token, base_url, headers, transaction_id, process_name)
     if source:
         log.info(f"Layer 1 resolved: {source}")
@@ -361,13 +477,11 @@ def fetch_logs(access_token: str, base_url: str, transaction_id: str, process_na
         log.info(f"Layer 2 resolved: {source}")
         return result, source
 
-    if not folder_id:
-        log.warning("Folder not identified from process name — running Layer 3: all-folders search")
-        result, source = _layer3_all_folders_fallback(access_token, base_url, transaction_id, process_name)
-        if result == _TRANSACTION_NOT_FOUND:
-            return _TRANSACTION_NOT_FOUND, "not_found"
+    log.info("Layer 2 found nothing, trying Layer 3: SpecificContent parallel search")
+    result, source = _layer3_specific_content(access_token, base_url, headers, transaction_id, process_name)
+    if source:
         log.info(f"Layer 3 resolved: {source}")
         return result, source
 
-    log.warning(f"Folder found but transaction '{transaction_id}' not in its logs or queue — transaction not found")
+    log.warning(f"Transaction '{transaction_id}' not found in any layer")
     return _TRANSACTION_NOT_FOUND, "not_found"
