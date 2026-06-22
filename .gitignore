@@ -1,0 +1,26 @@
+# Secrets and credentials
+.env
+.env.*
+*.env
+.auth.json
+refresh_token.ps1
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# UiPath local runtime
+__uipath/
+*.state.json
